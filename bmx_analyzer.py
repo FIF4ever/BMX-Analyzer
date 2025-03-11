@@ -597,4 +597,256 @@ class BMXAnalyzer:
                             all_patterns.extend(patterns)
         
         logger.info(f"Pattern detection complete. Found {len(all_patterns)} total patterns")
-        return all_patterns
+        return all_patternsdef _get_unique_combinations(self, df: pd.DataFrame, column_mapping: Dict[str, Optional[str]]) -> List[Tuple[str, str]]:
+        """
+        Get unique league and selection combinations from the DataFrame.
+        
+        Args:
+            df (pd.DataFrame): Input data.
+            column_mapping (Dict[str, Optional[str]]): Column mapping.
+        
+        Returns:
+            List[Tuple[str, str]]: List of (league, selection) tuples.
+        """
+        league_col = column_mapping.get('league')
+        selection_col = column_mapping.get('selection')
+        
+        if not league_col or not selection_col:
+            logger.error(f"Missing league or selection columns: {league_col=}, {selection_col=}")
+            return []
+        
+        combinations = df[[league_col, selection_col]].drop_duplicates().values.tolist()
+        return [(str(league), str(selection)) for league, selection in combinations]
+    
+    def _filter_data(self, df: pd.DataFrame, column_mapping: Dict[str, Optional[str]], 
+                    league: str, selection: str, model_type: Optional[Any] = None) -> pd.DataFrame:
+        """
+        Filter DataFrame for a specific league, selection, and model type.
+        
+        Args:
+            df (pd.DataFrame): Input data.
+            column_mapping (Dict[str, Optional[str]]): Column mapping.
+            league (str): League to filter by.
+            selection (str): Selection to filter by.
+            model_type (Any, optional): Model type to filter by.
+        
+        Returns:
+            pd.DataFrame: Filtered DataFrame.
+        """
+        league_col = column_mapping.get('league')
+        selection_col = column_mapping.get('selection')
+        model_type_col = column_mapping.get('model_type')
+        
+        if not league_col or not selection_col:
+            return pd.DataFrame()
+        
+        # Start with league and selection filter
+        mask = (df[league_col].astype(str) == league) & (df[selection_col].astype(str) == selection)
+        
+        # Add model type filter if specified and the column exists
+        if model_type is not None and model_type_col:
+            mask = mask & (df[model_type_col] == model_type)
+        
+        return df[mask].copy()
+    
+    def _generate_ai_band_heatmap(self, df: pd.DataFrame, column_mapping: Dict[str, Optional[str]], 
+                                 league: str, selection: str, staking_type: str, model_type: str) -> pd.DataFrame:
+        """
+        Generate AI percentage band heatmap for ROI analysis.
+        
+        Args:
+            df (pd.DataFrame): Filtered data for specific league and selection.
+            column_mapping (Dict[str, Optional[str]]): Column mapping.
+            league (str): League name.
+            selection (str): Selection name.
+            staking_type (str): Staking type (e.g., "MDS", "1US").
+            model_type (str): Model type ("BACK" or "LAY").
+        
+        Returns:
+            pd.DataFrame: Heatmap data with AI bands and ROI values.
+        """
+        ai_pct_col = column_mapping.get('ai_pct')
+        stake_col = column_mapping.get(f'{staking_type.lower()}_stake')
+        payout_col = column_mapping.get(f'{staking_type.lower()}_payout')
+        phase_col = column_mapping.get('phase')
+        season_col = column_mapping.get('season_number')
+        
+        if not ai_pct_col or not stake_col or not payout_col:
+            logger.warning(f"Missing required columns for heatmap: {ai_pct_col=}, {stake_col=}, {payout_col=}")
+            return pd.DataFrame()
+        
+        # Process through each AI percentage band (1% increments)
+        heatmap_results = []
+        
+        for ai_min in range(0, 100):
+            ai_max = ai_min + 1
+            
+            # Filter data for this AI band
+            band_data = df[(df[ai_pct_col] >= ai_min) & (df[ai_pct_col] < ai_max)]
+            
+            if len(band_data) < 1:
+                continue
+            
+            # Calculate ROI for this band
+            total_stake = band_data[stake_col].sum()
+            total_payout = band_data[payout_col].sum()
+            
+            if total_stake <= 0:
+                continue
+            
+            roi = (total_payout / total_stake) - 1
+            profit = total_payout - total_stake
+            
+            # Calculate strike rate (percentage of winning bets)
+            wins = band_data[band_data[payout_col] > band_data[stake_col]].shape[0]
+            strike_rate = wins / len(band_data) if len(band_data) > 0 else 0
+            
+            # Get phase distribution if available
+            phase_distribution = {}
+            if phase_col:
+                for phase in sorted(band_data[phase_col].unique()):
+                    phase_data = band_data[band_data[phase_col] == phase]
+                    if len(phase_data) >= self.config.min_sample_size_by_phase:
+                        phase_stake = phase_data[stake_col].sum()
+                        phase_payout = phase_data[payout_col].sum()
+                        phase_roi = (phase_payout / phase_stake) - 1 if phase_stake > 0 else None
+                        if phase_roi is not None:
+                            phase_distribution[int(phase)] = {
+                                'sample_size': len(phase_data),
+                                'roi': phase_roi,
+                                'stake': phase_stake,
+                                'payout': phase_payout
+                            }
+            
+            # Get season distribution if available
+            season_distribution = {}
+            if season_col:
+                for season in sorted(band_data[season_col].unique()):
+                    season_data = band_data[band_data[season_col] == season]
+                    season_stake = season_data[stake_col].sum()
+                    season_payout = season_data[payout_col].sum()
+                    season_roi = (season_payout / season_stake) - 1 if season_stake > 0 else None
+                    if season_roi is not None:
+                        season_distribution[str(season)] = {
+                            'sample_size': len(season_data),
+                            'roi': season_roi,
+                            'stake': season_stake,
+                            'payout': season_payout
+                        }
+            
+            heatmap_results.append({
+                'League': league,
+                'Selection': selection,
+                'Staking_Type': staking_type,
+                'Model_Type': model_type,
+                'AI_Min': ai_min,
+                'AI_Max': ai_max,
+                'ROI': roi,
+                'Profit': profit,
+                'Sample_Size': len(band_data),
+                'Total_Stake': total_stake,
+                'Total_Payout': total_payout,
+                'Strike_Rate': strike_rate,
+                'Phase_Distribution': phase_distribution,
+                'Season_Distribution': season_distribution
+            })
+        
+        return pd.DataFrame(heatmap_results)
+    
+    def _extract_patterns_from_heatmap(self, heatmap: pd.DataFrame, model_name: str,
+                                      league: str, selection: str, staking_type: str,
+                                      model_type: str, is_positive: bool = True) -> List[BMXPattern]:
+        """
+        Extract patterns from the AI band heatmap with flexible gap tolerance.
+        
+        Args:
+            heatmap (pd.DataFrame): Heatmap data.
+            model_name (str): Name of the model.
+            league (str): League name.
+            selection (str): Selection name.
+            staking_type (str): Staking type.
+            model_type (str): Model type ("BACK" or "LAY").
+            is_positive (bool): Whether to look for positive or negative patterns.
+        
+        Returns:
+            List[BMXPattern]: Detected patterns.
+        """
+        # Filter data based on ROI direction and sample size
+        if is_positive:
+            valid_data = heatmap[(heatmap['ROI'] > 0) & 
+                                (heatmap['Sample_Size'] >= self.config.min_sample_size)]
+            roi_threshold = self.config.min_pos_roi
+        else:
+            valid_data = heatmap[(heatmap['ROI'] < 0) & 
+                                (heatmap['Sample_Size'] >= self.config.min_sample_size)]
+            roi_threshold = self.config.min_neg_roi
+        
+        if valid_data.empty:
+            return []
+        
+        # Sort by AI percentage for sequential analysis
+        sorted_data = valid_data.sort_values('AI_Min')
+        
+        # Initialize pattern detection
+        patterns = []
+        used_ai_bands = set()
+        
+        for start_idx in range(len(sorted_data)):
+            if start_idx in used_ai_bands:
+                continue
+                
+            # Initialize a new potential pattern
+            start_band = sorted_data.iloc[start_idx]
+            current_pattern = [start_band]
+            gaps = []
+            gap_start = None
+            
+            # Look ahead for consecutive bands and tolerated gaps
+            for next_idx in range(start_idx + 1, len(sorted_data)):
+                next_band = sorted_data.iloc[next_idx]
+                prev_band = current_pattern[-1]
+                
+                # Check if this band is adjacent to the previous one
+                is_adjacent = next_band['AI_Min'] == prev_band['AI_Max']
+                
+                # Calculate the gap size if not adjacent
+                gap_size = next_band['AI_Min'] - prev_band['AI_Max'] if not is_adjacent else 0
+                
+                # Allow adding this band if:
+                # 1. It's adjacent to the previous band, OR
+                # 2. The gap is within allowed size AND we haven't exceeded max gaps
+                if is_adjacent:
+                    # If we were tracking a gap, close it
+                    if gap_start is not None:
+                        gaps.append((gap_start, prev_band['AI_Max']))
+                        gap_start = None
+                    current_pattern.append(next_band)
+                    
+                elif (gap_size <= self.config.max_pattern_gaps and 
+                      len(gaps) < self.config.max_pattern_gaps):
+                    # Start tracking a new gap if not already tracking one
+                    if gap_start is None:
+                        gap_start = prev_band['AI_Max']
+                    
+                    # Check if adding this band would maintain acceptable ROI
+                    # Calculate combined ROI including all bands so far plus this new one
+                    combined_stake = sum(band['Total_Stake'] for band in current_pattern) + next_band['Total_Stake']
+                    combined_payout = sum(band['Total_Payout'] for band in current_pattern) + next_band['Total_Payout']
+                    combined_roi = (combined_payout / combined_stake) - 1 if combined_stake > 0 else None
+                    
+                    # Only add this band if it doesn't hurt the pattern's ROI too much
+                    roi_drop = abs((current_pattern[-1]['ROI'] - combined_roi) if combined_roi is not None else float('inf'))
+                    
+                    if ((is_positive and combined_roi is not None and combined_roi > roi_threshold) or
+                        (not is_positive and combined_roi is not None and combined_roi < roi_threshold)):
+                        if roi_drop <= self.config.pattern_gap_tolerance:
+                            current_pattern.append(next_band)
+                        else:
+                            # This band hurts ROI too much, stop expanding
+                            break
+                    else:
+                        # ROI would fall below threshold, stop expanding
+                        break
+                else:
+                    # Gap too large or too many gaps, stop expanding
+                    break
