@@ -362,4 +362,239 @@ class BMXConfig:
             except Exception as e:
                 logger.error(f"Error processing explanation sheet: {e}")
                 
-        return column_mapping
+        return column_mapping#############################################
+# BMXPattern Class
+#############################################
+
+class BMXPattern:
+    """
+    Represents a detected betting pattern with comprehensive performance metrics.
+    """
+    def __init__(self, 
+                 model: str, 
+                 league: str, 
+                 selection: str, 
+                 ai_min: float, 
+                 ai_max: float, 
+                 phases: Optional[List[int]] = None, 
+                 staking_type: str = "MDS", 
+                 is_weighted: bool = False,
+                 model_type: str = "BACK"):
+        """
+        Initialize a betting pattern.
+        
+        Args:
+            model (str): Name of the model.
+            league (str): League name.
+            selection (str): Betting selection.
+            ai_min (float): Minimum AI percentage.
+            ai_max (float): Maximum AI percentage.
+            phases (List[int], optional): Phases included in the pattern.
+            staking_type (str, optional): Staking strategy type.
+            is_weighted (bool, optional): Whether season weighting is applied.
+            model_type (str, optional): Type of model (BACK/LAY).
+        """
+        self.model = model
+        self.league = league
+        self.selection = selection
+        self.ai_min = ai_min
+        self.ai_max = ai_max
+        self.phases = sorted(phases) if phases else list(range(1, 7))
+        self.staking_type = staking_type
+        self.is_weighted = is_weighted
+        self.model_type = model_type
+        
+        # Performance metrics
+        self.roi = None
+        self.sample_size = None
+        self.stake = None
+        self.payout = None
+        self.profit = None
+        self.strike_rate = None
+        
+        # Season breakdown
+        self.season_results = {}  # Dict mapping season number to performance metrics
+        
+        # Advanced analysis results
+        self.phase_results = {}
+        self.optimized_variants = []
+        self.validation_metrics = {}
+        self.trend_data = {}
+        
+        # Pattern detection metadata
+        self.gaps = []  # List of tuples (gap_start, gap_end) representing gaps in the pattern
+        self.contiguous_segments = []  # List of tuples (segment_start, segment_end)
+    
+    def generate_description(self) -> str:
+        """
+        Generate a comprehensive description of the pattern.
+        
+        Returns:
+            str: Detailed pattern description.
+        """
+        phases_str = "-".join(map(str, self.phases)) if self.phases else "All"
+        weight_str = " (Weighted)" if self.is_weighted else ""
+        roi_str = f"{self.roi*100:.2f}%" if self.roi is not None else "N/A"
+        
+        return (f"{self.model} [{self.model_type}]: {self.league} {self.selection} - "
+                f"AI {self.ai_min:.1f}%-{self.ai_max:.1f}% - "
+                f"Phases {phases_str} - {self.staking_type}{weight_str} - "
+                f"ROI: {roi_str} (n={self.sample_size or 0})")
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert pattern to a dictionary.
+        
+        Returns:
+            Dict[str, Any]: Dictionary representation of the pattern.
+        """
+        confidence_score = self.validation_metrics.get('confidence_score', 0)
+        
+        return {
+            'Model': self.model,
+            'Model_Type': self.model_type,
+            'League': self.league,
+            'Selection': self.selection,
+            'AI_Min': self.ai_min,
+            'AI_Max': self.ai_max,
+            'Phases': "-".join(map(str, self.phases)) if self.phases else "All",
+            'Staking_Type': self.staking_type,
+            'ROI': self.roi,
+            'Sample_Size': self.sample_size,
+            'Total_Stake': self.stake,
+            'Total_Payout': self.payout,
+            'Total_Profit': self.profit,
+            'Strike_Rate': self.strike_rate,
+            'Confidence_Score': confidence_score,
+            'Profitable_Season_Ratio': self.validation_metrics.get('profitable_season_ratio', 0),
+            'ROI_Stability': self.validation_metrics.get('roi_stability', 0),
+            'Statistical_Significance': self.validation_metrics.get('statistical_significance', 1.0),
+            'Bootstrap_Mean': self.validation_metrics.get('bootstrap_mean', 0),
+            'Bootstrap_CI_Lower': self.validation_metrics.get('bootstrap_ci_lower', 0),
+            'Bootstrap_CI_Upper': self.validation_metrics.get('bootstrap_ci_upper', 0),
+            'Trend_Direction': self.trend_data.get('trend_direction', 'Stable'),
+            'Sharpe_Ratio': self.validation_metrics.get('sharpe_ratio', 0),
+            'Pattern_Has_Gaps': len(self.gaps) > 0,
+            'Number_Of_Gaps': len(self.gaps),
+            'Is_Weighted': self.is_weighted
+        }
+
+
+#############################################
+# BMXAnalyzer Class
+#############################################
+
+class BMXAnalyzer:
+    """
+    Core analysis engine for detecting and validating betting patterns.
+    """
+    def __init__(self, config: BMXConfig):
+        """
+        Initialize the analyzer with configuration.
+        
+        Args:
+            config (BMXConfig): Configuration object.
+        """
+        self.config = config
+        logger.info("BMX Analyzer initialized")
+    
+    def detect_patterns(self, df: pd.DataFrame, model_name: str = "Detected Model") -> List[BMXPattern]:
+        """
+        Detect betting patterns in the input DataFrame.
+        
+        Args:
+            df (pd.DataFrame): Input data.
+            model_name (str): Name to assign to detected patterns.
+        
+        Returns:
+            List[BMXPattern]: Detected patterns.
+        """
+        logger.info(f"Starting pattern detection for {model_name}")
+        
+        # Preprocessing
+        df = self.config.normalize_ai_percentages(df)
+        column_mapping = self.config.identify_columns(df)
+        
+        # Check for required columns
+        required_cols = ['league', 'selection', 'ai_pct', 'phase', 'season_number', 'model_type']
+        missing_cols = [col for col in required_cols if column_mapping.get(col) is None]
+        
+        if missing_cols:
+            logger.error(f"Missing required columns: {missing_cols}")
+            logger.error(f"Available columns: {df.columns.tolist()}")
+            return []
+        
+        # Get unique league-selection combinations
+        unique_combinations = self._get_unique_combinations(df, column_mapping)
+        logger.info(f"Found {len(unique_combinations)} unique league-selection combinations")
+        
+        # Get unique model types
+        model_type_col = column_mapping.get('model_type')
+        model_types = df[model_type_col].unique() if model_type_col else ["BACK"]
+        
+        all_patterns = []
+        
+        # Process each league-selection-model_type combination
+        for league, selection in unique_combinations:
+            for model_type in model_types:
+                # Determine if this is a BACK or LAY model
+                if model_type_col:
+                    model_type_value = model_type
+                    is_lay_model = any(lay_keyword in str(model_type).upper() for lay_keyword in ['LAY', 'L'])
+                    model_type_str = "LAY" if is_lay_model else "BACK"
+                else:
+                    # Default to BACK if no model type column
+                    model_type_value = None
+                    model_type_str = "BACK"
+                
+                # Filter data for this combination
+                filtered_data = self._filter_data(df, column_mapping, league, selection, model_type_value)
+                
+                if len(filtered_data) < self.config.min_sample_size:
+                    logger.debug(f"Insufficient data for {league} {selection} {model_type_str}: {len(filtered_data)} rows")
+                    continue
+                
+                # Process with different staking types based on model type
+                for roi_direction in ["positive", "negative"]:
+                    staking_types = self.config.staking_types.get(model_type_str, {}).get(roi_direction, [])
+                    
+                    for staking_type in staking_types:
+                        stake_col = column_mapping.get(f'{staking_type.lower()}_stake')
+                        payout_col = column_mapping.get(f'{staking_type.lower()}_payout')
+                        
+                        if not stake_col or not payout_col:
+                            logger.warning(f"Missing columns for staking type {staking_type}: {stake_col=}, {payout_col=}")
+                            continue
+                        
+                        # Generate heatmap
+                        heatmap = self._generate_ai_band_heatmap(
+                            filtered_data, 
+                            column_mapping, 
+                            league, 
+                            selection, 
+                            staking_type,
+                            model_type_str
+                        )
+                        
+                        if heatmap.empty:
+                            logger.debug(f"No valid heatmap data for {league} {selection} {model_type_str} {staking_type}")
+                            continue
+                        
+                        # Extract patterns from heatmap
+                        is_positive = roi_direction == "positive"
+                        patterns = self._extract_patterns_from_heatmap(
+                            heatmap, 
+                            model_name,
+                            league, 
+                            selection, 
+                            staking_type,
+                            model_type_str,
+                            is_positive
+                        )
+                        
+                        if patterns:
+                            logger.info(f"Found {len(patterns)} {roi_direction} patterns for {league} {selection} {model_type_str} {staking_type}")
+                            all_patterns.extend(patterns)
+        
+        logger.info(f"Pattern detection complete. Found {len(all_patterns)} total patterns")
+        return all_patterns
